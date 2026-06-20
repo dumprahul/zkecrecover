@@ -1,0 +1,6 @@
+[package]
+name = "zkecrecover"
+type = "bin"
+authors = ["Rahul Shanmugam S"]
+
+[dependencies]
