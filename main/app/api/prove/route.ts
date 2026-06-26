@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { hashMessage, recoverPublicKey } from "viem";
 import { execSync } from "child_process";
-import { writeFileSync, mkdirSync, rmSync, existsSync } from "fs";
+import { writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import type { Hex } from "viem";
@@ -22,11 +22,15 @@ function toTomlArray(arr: number[]): string {
   return "[" + arr.map((b) => "0x" + b.toString(16).padStart(2, "0")).join(", ") + "]";
 }
 
-// Path to the circuit project
+function bytesToHex(bytes: Buffer): string {
+  return "0x" + bytes.toString("hex");
+}
+
 const CIRCUIT_DIR = join(process.cwd(), "..", "circuit");
+const NARGO = "/Users/apple/.nargo/bin/nargo";
+const BB = "/Users/apple/.bb/bb";
 
 export async function POST(req: NextRequest) {
-  // Create a unique temp dir for this request
   const tmpDir = join(tmpdir(), `zkprove-${Date.now()}`);
 
   try {
@@ -51,7 +55,7 @@ export async function POST(req: NextRequest) {
     const hashed_message = hexToBytes(msgHash, 32);
     const expected_address = hexToBytes(address, 20);
 
-    // Write Prover.toml into the circuit dir
+    // Write Prover.toml
     const proverToml = `pub_key_x = ${toTomlArray(pub_key_x)}
 pub_key_y = ${toTomlArray(pub_key_y)}
 signature = ${toTomlArray(sig64)}
@@ -60,36 +64,60 @@ expected_address = ${toTomlArray(expected_address)}
 `;
     writeFileSync(join(CIRCUIT_DIR, "Prover.toml"), proverToml);
 
-    // Create temp dirs for proof output
     mkdirSync(tmpDir, { recursive: true });
     const proofsDir = join(tmpDir, "proofs");
     mkdirSync(proofsDir);
 
-    const circuitJson = join(CIRCUIT_DIR, "target", "main_zkecrecover.json");
-    const vkPath = join(CIRCUIT_DIR, "target", "vk", "vk");
-    const witnessPath = join(CIRCUIT_DIR, "target", "main_zkecrecover.gz");
+    const evmVkDir = join(tmpDir, "vk");
+    mkdirSync(evmVkDir);
 
-    const NARGO = "/Users/apple/.nargo/bin/nargo";
-    const BB = "/Users/apple/.bb/bb";
+    const circuitJson = join(CIRCUIT_DIR, "target", "main_zkecrecover.json");
+    const witnessPath = join(CIRCUIT_DIR, "target", "main_zkecrecover.gz");
 
     // Step 1: Generate witness
     execSync(`${NARGO} execute`, { cwd: CIRCUIT_DIR, timeout: 30000 });
 
-    // Step 2: Generate proof
+    // Step 2: Generate default VK + off-chain proof + verify
+    const defaultVkPath = join(CIRCUIT_DIR, "target", "vk", "vk");
     execSync(
-      `${BB} prove -b ${circuitJson} -w ${witnessPath} -o ${proofsDir} -k ${vkPath}`,
+      `${BB} prove -b ${circuitJson} -w ${witnessPath} -o ${proofsDir} -k ${defaultVkPath}`,
+      { timeout: 120000 }
+    );
+    const verifyOut = execSync(
+      `${BB} verify -k ${defaultVkPath} -p ${proofsDir}/proof -i ${proofsDir}/public_inputs`,
+      { timeout: 30000 }
+    ).toString();
+    const verified = verifyOut.includes("successfully") || verifyOut.trim() === "";
+
+    // Step 3: Generate EVM VK + EVM proof for on-chain verification
+    execSync(`${BB} write_vk -b ${circuitJson} -o ${evmVkDir} -t evm`, { timeout: 60000 });
+    const evmVkPath = join(evmVkDir, "vk");
+    const evmProofsDir = join(tmpDir, "evm_proofs");
+    mkdirSync(evmProofsDir);
+    execSync(
+      `${BB} prove -b ${circuitJson} -w ${witnessPath} -o ${evmProofsDir} -k ${evmVkPath} -t evm`,
       { timeout: 120000 }
     );
 
-    // Step 3: Verify proof
-    const verifyOut = execSync(
-      `${BB} verify -k ${vkPath} -p ${proofsDir}/proof -i ${proofsDir}/public_inputs`,
-      { timeout: 30000 }
-    ).toString();
+    // Read EVM proof bytes and public inputs
+    const evmProofBytes = readFileSync(join(evmProofsDir, "proof"));
+    const evmPublicInputsBytes = readFileSync(join(evmProofsDir, "public_inputs"));
 
-    const verified = verifyOut.includes("successfully") || verifyOut.trim() === "";
+    // public_inputs file is raw bytes: 20 bytes for address, padded to bytes32
+    // Contract expects bytes32[] — each public input padded to 32 bytes
+    const pubInputHex = evmPublicInputsBytes.toString("hex");
+    // Split into 32-byte chunks
+    const publicInputs: string[] = [];
+    for (let i = 0; i < pubInputHex.length; i += 64) {
+      publicInputs.push("0x" + pubInputHex.slice(i, i + 64).padStart(64, "0"));
+    }
 
-    return NextResponse.json({ verified, proofSize: 2144 });
+    return NextResponse.json({
+      verified,
+      proofSize: evmProofBytes.length,
+      evmProof: bytesToHex(evmProofBytes),
+      publicInputs,
+    });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     return NextResponse.json({ error: msg }, { status: 500 });

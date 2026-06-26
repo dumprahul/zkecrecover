@@ -3,7 +3,8 @@ import type { Hex } from "viem";
 export type ProofResult = {
   verified: boolean;
   proofSize: number;
-  publicInputs: string[];
+  evmProof: Hex;
+  publicInputs: Hex[];
 };
 
 export async function generateAndVerifyProof(
