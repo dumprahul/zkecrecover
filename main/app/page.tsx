@@ -6,11 +6,8 @@ import {
   useConnect,
   useDisconnect,
   useSignMessage,
-  useWriteContract,
-  useWaitForTransactionReceipt,
-  useSwitchChain,
+  usePublicClient,
 } from "wagmi";
-import { sepolia } from "wagmi/chains";
 import { injected } from "wagmi/connectors";
 import { generateAndVerifyProof, type ProofResult } from "../lib/zkproof";
 import type { Hex } from "viem";
@@ -33,14 +30,11 @@ const VERIFIER_ABI = [
 type Step = "idle" | "signing" | "proving" | "done" | "error";
 
 export default function Home() {
-  const { address, isConnected, chain } = useAccount();
+  const { address, isConnected } = useAccount();
   const { connect } = useConnect();
   const { disconnect } = useDisconnect();
   const { signMessageAsync } = useSignMessage();
-  const { switchChain } = useSwitchChain();
-  const { writeContractAsync, data: txHash } = useWriteContract();
-  const { isLoading: isTxPending, isSuccess: isTxSuccess } =
-    useWaitForTransactionReceipt({ hash: txHash });
+  const publicClient = usePublicClient({ chainId: 11155111 }); // Sepolia
 
   const [message, setMessage] = useState("");
   const [step, setStep] = useState<Step>("idle");
@@ -74,30 +68,23 @@ export default function Home() {
   }
 
   async function handleOnchainVerify() {
-    if (!result) return;
+    if (!result || !publicClient) return;
     setOnchainVerifying(true);
     setOnchainError(null);
     setOnchainResult(null);
 
     try {
-      // Switch to Sepolia if needed
-      if (chain?.id !== sepolia.id) {
-        await switchChain({ chainId: sepolia.id });
-      }
-
-      // Call verify on the deployed contract
-      const tx = await writeContractAsync({
+      // verify() is a view function — use readContract (eth_call, no gas, no MetaMask popup)
+      const verified = await publicClient.readContract({
         address: VERIFIER_ADDRESS,
         abi: VERIFIER_ABI,
         functionName: "verify",
         args: [result.evmProof, result.publicInputs as Hex[]],
       });
 
-      // Wait handled by useWaitForTransactionReceipt — mark success
-      console.log("tx hash:", tx);
-      setOnchainResult(true);
+      setOnchainResult(verified as boolean);
     } catch (e: unknown) {
-      setOnchainError(e instanceof Error ? e.message : "Transaction failed");
+      setOnchainError(e instanceof Error ? e.message : "On-chain call failed");
       setOnchainResult(false);
     } finally {
       setOnchainVerifying(false);
@@ -215,10 +202,10 @@ export default function Home() {
 
                   <button
                     onClick={handleOnchainVerify}
-                    disabled={onchainVerifying || isTxPending}
+                    disabled={onchainVerifying}
                     className="w-full py-3 rounded-lg bg-violet-600 text-white text-sm font-semibold hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   >
-                    {onchainVerifying || isTxPending
+                    {onchainVerifying
                       ? "Verifying on-chain..."
                       : "Verify On-Chain (Sepolia)"}
                   </button>
@@ -227,22 +214,14 @@ export default function Home() {
                   {(onchainResult !== null || onchainError) && (
                     <div className={`mt-3 p-3 rounded-lg text-xs ${onchainResult ? "bg-green-950/30 border border-green-800" : "bg-red-950/30 border border-red-800"}`}>
                       {onchainResult && (
-                        <>
-                          <p className="text-green-400 font-semibold mb-1">✓ On-chain verification successful</p>
-                          {txHash && (
-                            <p className="text-zinc-400">
-                              Tx:{" "}
-                              <a
-                                href={`https://sepolia.etherscan.io/tx/${txHash}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-violet-400 underline break-all"
-                              >
-                                {txHash}
-                              </a>
-                            </p>
-                          )}
-                        </>
+                        <p className="text-green-400 font-semibold">
+                          ✓ On-chain verification successful — contract returned true
+                        </p>
+                      )}
+                      {onchainResult === false && !onchainError && (
+                        <p className="text-red-400 font-semibold">
+                          ✗ Contract returned false
+                        </p>
                       )}
                       {onchainError && (
                         <p className="text-red-300 break-all">{onchainError}</p>
