@@ -5,7 +5,7 @@ fn main(
     pub_key_y: [u8; 32],
     signature: [u8; 64],
     hashed_message: [u8; 32],
-    expected_address: [u8; 20],
+    expected_address: pub [u8; 20],
 ) {
     // Step 1: verify the ECDSA signature is valid
     let valid = std::ecdsa_secp256k1::verify_signature(
