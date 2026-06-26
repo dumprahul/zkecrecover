@@ -1,0 +1,15 @@
+# Keystore — never commit private keys
+keystore/
+
+# Node
+node_modules/
+package-lock.json
+
+# Noir build artifacts
+target/
+
+# Proof artifacts
+proofs/
+
+# JS helper scripts
+extract_inputs.js
